@@ -36,6 +36,7 @@ define([
      * @param {String} options.url The url for the tile.
      * @param {Rectangle} [options.rectangle=Rectangle.MAX_VALUE] The rectangle, in radians, covered by the image.
      * @param {Credit|String} [options.credit] A credit for the data source, which is displayed on the canvas.
+     * @param {Ellipsoid} [options.ellipsoid] The ellipsoid.  If not specified, the WGS84 ellipsoid is used.
      * @param {Object} [options.proxy] A proxy to use for requests. This object is expected to have a getURL function which returns the proxied URL, if needed.
      *
      * @see ArcGisMapServerImageryProvider
@@ -44,6 +45,8 @@ define([
      * @see OpenStreetMapImageryProvider
      * @see TileMapServiceImageryProvider
      * @see WebMapServiceImageryProvider
+     * @see WebMapTileServiceImageryProvider
+     * @see UrlTemplateImageryProvider
      */
     var SingleTileImageryProvider = function(options) {
         options = defaultValue(options, {});
@@ -64,7 +67,8 @@ define([
         var tilingScheme = new GeographicTilingScheme({
             rectangle : rectangle,
             numberOfLevelZeroTilesX : 1,
-            numberOfLevelZeroTilesY : 1
+            numberOfLevelZeroTilesY : 1,
+            ellipsoid : options.ellipsoid
         });
         this._tilingScheme = tilingScheme;
 
@@ -107,7 +111,8 @@ define([
                     that._errorEvent,
                     message,
                     0, 0, 0,
-                    doRequest);
+                    doRequest,
+                    e);
         }
 
         function doRequest() {
@@ -349,7 +354,7 @@ define([
      * @param {Number} x The tile X coordinate.
      * @param {Number} y The tile Y coordinate.
      * @param {Number} level The tile level.
-     * @returns {Promise} A promise for the image that will resolve when the image is available, or
+     * @returns {Promise.<Image|Canvas>|undefined} A promise for the image that will resolve when the image is available, or
      *          undefined if there are too many active requests to the server, and the request
      *          should be retried later.  The resolved image may be either an
      *          Image or a Canvas DOM object.
@@ -375,7 +380,7 @@ define([
      * @param {Number} level The tile level.
      * @param {Number} longitude The longitude at which to pick features.
      * @param {Number} latitude  The latitude at which to pick features.
-     * @return {Promise} A promise for the picked features that will resolve when the asynchronous
+     * @return {Promise.<ImageryLayerFeatureInfo[]>|undefined} A promise for the picked features that will resolve when the asynchronous
      *                   picking completes.  The resolved value is an array of {@link ImageryLayerFeatureInfo}
      *                   instances.  The array may be empty if no features are found at the given location.
      *                   It may also be undefined if picking is not supported.

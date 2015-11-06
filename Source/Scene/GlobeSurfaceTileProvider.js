@@ -1,29 +1,41 @@
 /*global define*/
 define([
         '../Core/BoundingSphere',
+        '../Core/BoxOutlineGeometry',
         '../Core/Cartesian2',
         '../Core/Cartesian3',
         '../Core/Cartesian4',
         '../Core/Color',
+        '../Core/ColorGeometryInstanceAttribute',
+        '../Core/defaultValue',
         '../Core/defined',
         '../Core/defineProperties',
         '../Core/destroyObject',
         '../Core/DeveloperError',
         '../Core/Event',
         '../Core/FeatureDetection',
+        '../Core/GeometryInstance',
         '../Core/GeometryPipeline',
         '../Core/IndexDatatype',
         '../Core/Intersect',
         '../Core/Matrix4',
+        '../Core/OrientedBoundingBox',
         '../Core/PrimitiveType',
         '../Core/Rectangle',
+        '../Core/SphereOutlineGeometry',
         '../Core/Visibility',
         '../Core/WebMercatorProjection',
+        '../Renderer/Buffer',
         '../Renderer/BufferUsage',
+        '../Renderer/ContextLimits',
         '../Renderer/DrawCommand',
+        '../Renderer/RenderState',
+        '../Renderer/VertexArray',
         '../Scene/BlendingState',
         '../Scene/DepthFunction',
         '../Scene/Pass',
+        '../Scene/PerInstanceColorAppearance',
+        '../Scene/Primitive',
         '../ThirdParty/when',
         './GlobeSurfaceTile',
         './ImageryLayer',
@@ -32,29 +44,41 @@ define([
         './SceneMode'
     ], function(
         BoundingSphere,
+        BoxOutlineGeometry,
         Cartesian2,
         Cartesian3,
         Cartesian4,
         Color,
+        ColorGeometryInstanceAttribute,
+        defaultValue,
         defined,
         defineProperties,
         destroyObject,
         DeveloperError,
         Event,
         FeatureDetection,
+        GeometryInstance,
         GeometryPipeline,
         IndexDatatype,
         Intersect,
         Matrix4,
+        OrientedBoundingBox,
         PrimitiveType,
         Rectangle,
+        SphereOutlineGeometry,
         Visibility,
         WebMercatorProjection,
+        Buffer,
         BufferUsage,
+        ContextLimits,
         DrawCommand,
+        RenderState,
+        VertexArray,
         BlendingState,
         DepthFunction,
         Pass,
+        PerInstanceColorAppearance,
+        Primitive,
         when,
         GlobeSurfaceTile,
         ImageryLayer,
@@ -101,8 +125,10 @@ define([
         this._terrainProvider = options.terrainProvider;
         this._imageryLayers = options.imageryLayers;
         this._surfaceShaderSet = options.surfaceShaderSet;
+
         this._renderState = undefined;
         this._blendRenderState = undefined;
+        this._pickRenderState = undefined;
 
         this._errorEvent = new Event();
 
@@ -116,7 +142,9 @@ define([
         this._tilesToRenderByTextureCount = [];
         this._drawCommands = [];
         this._uniformMaps = [];
+        this._pickCommands = [];
         this._usedDrawCommands = 0;
+        this._usedPickCommands = 0;
 
         this._debug = {
             wireframe : false,
@@ -254,12 +282,9 @@ define([
      * Called at the beginning of the update cycle for each render frame, before {@link QuadtreeTileProvider#showTileThisFrame}
      * or any other functions.
      *
-     * @param {Context} context The rendering context.
      * @param {FrameState} frameState The frame state.
-     * @param {DrawCommand[]} commandList An array of rendering commands.  This method may push
-     *        commands into this array.
      */
-    GlobeSurfaceTileProvider.prototype.beginUpdate = function(context, frameState, commandList) {
+    GlobeSurfaceTileProvider.prototype.beginUpdate = function(frameState) {
         this._imageryLayers._update();
 
         if (this._layerOrderChanged) {
@@ -304,25 +329,21 @@ define([
      * Called at the end of the update cycle for each render frame, after {@link QuadtreeTileProvider#showTileThisFrame}
      * and any other functions.
      *
-     * @param {Context} context The rendering context.
      * @param {FrameState} frameState The frame state.
-     * @param {DrawCommand[]} commandList An array of rendering commands.  This method may push
-     *        commands into this array.
      */
-    GlobeSurfaceTileProvider.prototype.endUpdate = function(context, frameState, commandList) {
+    GlobeSurfaceTileProvider.prototype.endUpdate = function(frameState) {
         if (!defined(this._renderState)) {
-            this._renderState = context.createRenderState({ // Write color and depth
+            this._renderState = RenderState.fromCache({ // Write color and depth
                 cull : {
                     enabled : true
                 },
                 depthTest : {
-                    enabled : true
+                    enabled : true,
+                    func : DepthFunction.LESS
                 }
             });
-        }
 
-        if (!defined(this._blendRenderState)) {
-            this._blendRenderState = context.createRenderState({ // Write color and depth
+            this._blendRenderState = RenderState.fromCache({ // Write color and depth
                 cull : {
                     enabled : true
                 },
@@ -334,10 +355,7 @@ define([
             });
         }
 
-        this._renderState.depthTest.enabled = frameState.mode === SceneMode.SCENE3D || frameState.mode === SceneMode.COLUMBUS_VIEW;
-        this._blendRenderState.depthTest.enabled = this._renderState.depthTest.enabled;
-
-        // And the tile render commands to the command list, sorted by texture count.
+        // Add the tile render commands to the command list, sorted by texture count.
         var tilesToRenderByTextureCount = this._tilesToRenderByTextureCount;
         for (var textureCountIndex = 0, textureCountLength = tilesToRenderByTextureCount.length; textureCountIndex < textureCountLength; ++textureCountIndex) {
             var tilesToRender = tilesToRenderByTextureCount[textureCountIndex];
@@ -346,8 +364,38 @@ define([
             }
 
             for (var tileIndex = 0, tileLength = tilesToRender.length; tileIndex < tileLength; ++tileIndex) {
-                addDrawCommandsForTile(this, tilesToRender[tileIndex], context, frameState, commandList);
+                addDrawCommandsForTile(this, tilesToRender[tileIndex], frameState);
             }
+        }
+    };
+
+    /**
+     * Adds draw commands for tiles rendered in the previous frame for a pick pass.
+     *
+     * @param {FrameState} frameState The frame state.
+     */
+    GlobeSurfaceTileProvider.prototype.updateForPick = function(frameState) {
+        if (!defined(this._pickRenderState)) {
+            this._pickRenderState = RenderState.fromCache({
+                colorMask : {
+                    red : false,
+                    green : false,
+                    blue : false,
+                    alpha : false
+                },
+                depthTest : {
+                    enabled : true
+                }
+            });
+        }
+
+        this._usedPickCommands = 0;
+        var drawCommands = this._drawCommands;
+
+        // Add the tile pick commands from the tiles drawn last frame.
+        var tilesToRenderByTextureCount = this._tilesToRenderByTextureCount;
+        for (var i = 0, length = this._usedDrawCommands; i < length; ++i) {
+            addPickCommandsForTile(this, drawCommands[i], frameState);
         }
     };
 
@@ -367,14 +415,13 @@ define([
      * until {@link QuadtreeTile#state} is no longer {@link QuadtreeTileLoadState#LOADING}.  This function should
      * not be called before {@link GlobeSurfaceTileProvider#ready} returns true.
      *
-     * @param {Context} context The rendering context.
      * @param {FrameState} frameState The frame state.
      * @param {QuadtreeTile} tile The tile to load.
      *
      * @exception {DeveloperError} <code>loadTile</code> must not be called before the tile provider is ready.
      */
-    GlobeSurfaceTileProvider.prototype.loadTile = function(context, frameState, tile) {
-        GlobeSurfaceTile.processStateMachine(tile, context, this._terrainProvider, this._imageryLayers);
+    GlobeSurfaceTileProvider.prototype.loadTile = function(frameState, tile) {
+        GlobeSurfaceTile.processStateMachine(tile, frameState.context, frameState.commandList, this._terrainProvider, this._imageryLayers);
     };
 
     var boundingSphereScratch = new BoundingSphere();
@@ -395,7 +442,7 @@ define([
 
         var cullingVolume = frameState.cullingVolume;
 
-        var boundingVolume = surfaceTile.boundingSphere3D;
+        var boundingVolume = defaultValue(surfaceTile.orientedBoundingBox, surfaceTile.boundingSphere3D);
 
         if (frameState.mode !== SceneMode.SCENE3D) {
             boundingVolume = boundingSphereScratch;
@@ -432,7 +479,7 @@ define([
     var modifiedModelViewScratch = new Matrix4();
     var tileRectangleScratch = new Cartesian4();
     var rtcScratch = new Cartesian3();
-    var centerEyeScratch = new Cartesian4();
+    var centerEyeScratch = new Cartesian3();
     var southwestScratch = new Cartesian3();
     var northeastScratch = new Cartesian3();
 
@@ -442,11 +489,9 @@ define([
      * expected to be visible next frame as well, unless this method is called next frame, too.
      *
      * @param {Object} tile The tile instance.
-     * @param {Context} context The rendering context.
      * @param {FrameState} frameState The state information of the current rendering frame.
-     * @param {DrawCommand[]} commandList The list of rendering commands.  This method may add additional commands to this list.
      */
-    GlobeSurfaceTileProvider.prototype.showTileThisFrame = function(tile, context, frameState, commandList) {
+    GlobeSurfaceTileProvider.prototype.showTileThisFrame = function(tile, frameState) {
         var readyTextureCount = 0;
         var tileImageryCollection = tile.data.imagery;
         for (var i = 0, len = tileImageryCollection.length; i < len; ++i) {
@@ -703,8 +748,8 @@ define([
             u_southAndNorthLatitude : function() {
                 return this.southAndNorthLatitude;
             },
-            u_southMercatorYLowAndHighAndOneOverHeight : function() {
-                return this.southMercatorYLowAndHighAndOneOverHeight;
+            u_southMercatorYAndOneOverHeight : function() {
+                return this.southMercatorYAndOneOverHeight;
             },
             u_waterMask : function() {
                 return this.waterMask;
@@ -734,7 +779,7 @@ define([
             dayIntensity : 0.0,
 
             southAndNorthLatitude : new Cartesian2(),
-            southMercatorYLowAndHighAndOneOverHeight : new Cartesian3(),
+            southMercatorYAndOneOverHeight : new Cartesian2(),
 
             waterMask : undefined,
             waterMaskTranslationAndScale : new Cartesian4()
@@ -790,18 +835,95 @@ define([
         GeometryPipeline.toWireframe(geometry);
 
         var wireframeIndices = geometry.indices;
-        var wireframeIndexBuffer = context.createIndexBuffer(wireframeIndices, BufferUsage.STATIC_DRAW, IndexDatatype.UNSIGNED_SHORT);
-        return context.createVertexArray(vertexArray._attributes, wireframeIndexBuffer);
+        var wireframeIndexBuffer = Buffer.createIndexBuffer({
+            context : context,
+            typedArray : wireframeIndices,
+            usage : BufferUsage.STATIC_DRAW,
+            indexDatatype : IndexDatatype.UNSIGNED_SHORT
+        });
+        return new VertexArray({
+            context : context,
+            attributes : vertexArray._attributes,
+            indexBuffer : wireframeIndexBuffer
+        });
     }
+
+    var getDebugOrientedBoundingBox;
+    var getDebugBoundingSphere;
+    var debugDestroyPrimitive;
+
+    (function() {
+        var instanceOBB = new GeometryInstance({
+            geometry: BoxOutlineGeometry.fromDimensions({ dimensions: new Cartesian3(2.0, 2.0, 2.0) })
+        });
+        var instanceSphere = new GeometryInstance({
+            geometry: new SphereOutlineGeometry({ radius: 1.0 })
+        });
+        var modelMatrix = new Matrix4();
+        var previousVolume;
+        var primitive;
+
+        function createDebugPrimitive(instance) {
+            return new Primitive({
+                geometryInstances : instance,
+                appearance : new PerInstanceColorAppearance({
+                    translucent : false,
+                    flat : true
+                }),
+                asynchronous : false
+            });
+        }
+
+        getDebugOrientedBoundingBox = function(obb, color) {
+            if (obb === previousVolume) {
+                return primitive;
+            }
+            debugDestroyPrimitive();
+
+            previousVolume = obb;
+            modelMatrix = Matrix4.fromRotationTranslation(obb.halfAxes, obb.center, modelMatrix);
+
+            instanceOBB.modelMatrix = modelMatrix;
+            instanceOBB.attributes.color = ColorGeometryInstanceAttribute.fromColor(color);
+
+            primitive = createDebugPrimitive(instanceOBB);
+            return primitive;
+        };
+
+        getDebugBoundingSphere = function(sphere, color) {
+            if (sphere === previousVolume) {
+                return primitive;
+            }
+            debugDestroyPrimitive();
+
+            previousVolume = sphere;
+            modelMatrix = Matrix4.fromTranslation(sphere.center, modelMatrix);
+            modelMatrix = Matrix4.multiplyByUniformScale(modelMatrix, sphere.radius, modelMatrix);
+
+            instanceSphere.modelMatrix = modelMatrix;
+            instanceSphere.attributes.color = ColorGeometryInstanceAttribute.fromColor(color);
+
+            primitive = createDebugPrimitive(instanceSphere);
+            return primitive;
+        };
+
+        debugDestroyPrimitive = function() {
+            if (defined(primitive)) {
+                primitive.destroy();
+                primitive = undefined;
+                previousVolume = undefined;
+            }
+        };
+    })();
 
     var otherPassesInitialColor = new Cartesian4(0.0, 0.0, 0.0, 0.0);
 
-    function addDrawCommandsForTile(tileProvider, tile, context, frameState, commandList) {
+    function addDrawCommandsForTile(tileProvider, tile, frameState) {
         var surfaceTile = tile.data;
 
         var viewMatrix = frameState.camera.viewMatrix;
 
-        var maxTextures = context.maximumTextureImageUnits;
+        var maxTextures = ContextLimits.maximumTextureImageUnits;
 
         var waterMaskTexture = surfaceTile.waterMaskTexture;
         var showReflectiveOcean = tileProvider.hasWaterMask && defined(waterMaskTexture);
@@ -824,8 +946,7 @@ define([
         // Only used for Mercator projections.
         var southLatitude = 0.0;
         var northLatitude = 0.0;
-        var southMercatorYHigh = 0.0;
-        var southMercatorYLow = 0.0;
+        var southMercatorY = 0.0;
         var oneOverMercatorHeight = 0.0;
 
         var useWebMercatorProjection = false;
@@ -856,27 +977,16 @@ define([
                 southLatitude = tile.rectangle.south;
                 northLatitude = tile.rectangle.north;
 
-                var southMercatorY = WebMercatorProjection.geodeticLatitudeToMercatorAngle(southLatitude);
-                var northMercatorY = WebMercatorProjection.geodeticLatitudeToMercatorAngle(northLatitude);
+                southMercatorY = WebMercatorProjection.geodeticLatitudeToMercatorAngle(southLatitude);
 
-                float32ArrayScratch[0] = southMercatorY;
-                southMercatorYHigh = float32ArrayScratch[0];
-                southMercatorYLow = southMercatorY - float32ArrayScratch[0];
-
-                oneOverMercatorHeight = 1.0 / (northMercatorY - southMercatorY);
+                oneOverMercatorHeight = 1.0 / (WebMercatorProjection.geodeticLatitudeToMercatorAngle(northLatitude) - southMercatorY);
 
                 useWebMercatorProjection = true;
             }
         }
 
-        var centerEye = centerEyeScratch;
-        centerEye.x = rtc.x;
-        centerEye.y = rtc.y;
-        centerEye.z = rtc.z;
-        centerEye.w = 1.0;
-
-        Matrix4.multiplyByVector(viewMatrix, centerEye, centerEye);
-        Matrix4.setColumn(viewMatrix, 3, centerEye, modifiedModelViewScratch);
+        var centerEye = Matrix4.multiplyByPoint(viewMatrix, rtc, centerEyeScratch);
+        Matrix4.setTranslation(viewMatrix, centerEye, modifiedModelViewScratch);
 
         var tileImageryCollection = surfaceTile.imagery;
         var imageryIndex = 0;
@@ -887,6 +997,12 @@ define([
         var renderState = firstPassRenderState;
 
         var initialColor = tileProvider._firstPassInitialColor;
+
+        var context = frameState.context;
+
+        if (!defined(tileProvider._debug.boundingSphereTile)) {
+            debugDestroyPrimitive();
+        }
 
         do {
             var numberOfDayTextures = 0;
@@ -899,6 +1015,7 @@ define([
                 command.owner = tile;
                 command.cull = false;
                 command.boundingVolume = new BoundingSphere();
+                command.orientedBoundingBox = undefined;
 
                 uniformMap = createTileUniformMap();
 
@@ -913,7 +1030,16 @@ define([
 
             ++tileProvider._usedDrawCommands;
 
-            command.debugShowBoundingVolume = (tile === tileProvider._debug.boundingSphereTile);
+            if (tile === tileProvider._debug.boundingSphereTile) {
+                // If a debug primitive already exists for this tile, it will not be
+                // re-created, to avoid allocation every frame. If it were possible
+                // to have more than one selected tile, this would have to change.
+                if (defined(surfaceTile.orientedBoundingBox)) {
+                    getDebugOrientedBoundingBox(surfaceTile.orientedBoundingBox, Color.RED).update(frameState);
+                } else if (defined(surfaceTile.boundingSphere3D)) {
+                    getDebugBoundingSphere(surfaceTile.boundingSphere3D, Color.RED).update(frameState);
+                }
+            }
 
             Cartesian4.clone(initialColor, uniformMap.initialColor);
             uniformMap.oceanNormalMap = oceanNormalMap;
@@ -926,9 +1052,8 @@ define([
             Cartesian4.clone(tileRectangle, uniformMap.tileRectangle);
             uniformMap.southAndNorthLatitude.x = southLatitude;
             uniformMap.southAndNorthLatitude.y = northLatitude;
-            uniformMap.southMercatorYLowAndHighAndOneOverHeight.x = southMercatorYLow;
-            uniformMap.southMercatorYLowAndHighAndOneOverHeight.y = southMercatorYHigh;
-            uniformMap.southMercatorYLowAndHighAndOneOverHeight.z = oneOverMercatorHeight;
+            uniformMap.southMercatorYAndOneOverHeight.x = southMercatorY;
+            uniformMap.southMercatorYAndOneOverHeight.y = oneOverMercatorHeight;
             Matrix4.clone(modifiedModelViewScratch, uniformMap.modifiedModelView);
 
             var applyBrightness = false;
@@ -1008,6 +1133,7 @@ define([
             }
 
             var boundingVolume = command.boundingVolume;
+            var orientedBoundingBox = command.orientedBoundingBox;
 
             if (frameState.mode !== SceneMode.SCENE3D) {
                 BoundingSphere.fromRectangleWithHeights2D(tile.rectangle, frameState.mapProjection, surfaceTile.minimumHeight, surfaceTile.maximumHeight, boundingVolume);
@@ -1017,14 +1143,44 @@ define([
                     boundingVolume = BoundingSphere.union(surfaceTile.boundingSphere3D, boundingVolume, boundingVolume);
                 }
             } else {
-                BoundingSphere.clone(surfaceTile.boundingSphere3D, boundingVolume);
+                command.boundingVolume = BoundingSphere.clone(surfaceTile.boundingSphere3D, boundingVolume);
+                command.orientedBoundingBox = OrientedBoundingBox.clone(surfaceTile.orientedBoundingBox, orientedBoundingBox);
             }
 
-            commandList.push(command);
+            frameState.commandList.push(command);
 
             renderState = otherPassesRenderState;
             initialColor = otherPassesInitialColor;
         } while (imageryIndex < imageryLen);
+    }
+
+    function addPickCommandsForTile(tileProvider, drawCommand, frameState) {
+        var pickCommand;
+        if (tileProvider._pickCommands.length <= tileProvider._usedPickCommands) {
+            pickCommand = new DrawCommand();
+            pickCommand.cull = false;
+
+            tileProvider._pickCommands.push(pickCommand);
+        } else {
+            pickCommand = tileProvider._pickCommands[tileProvider._usedPickCommands];
+        }
+
+        ++tileProvider._usedPickCommands;
+
+        var useWebMercatorProjection = frameState.projection instanceof WebMercatorProjection;
+
+        pickCommand.shaderProgram = tileProvider._surfaceShaderSet.getShaderProgram(frameState.context, frameState.mode, useWebMercatorProjection);
+        pickCommand.renderState = tileProvider._pickRenderState;
+
+        pickCommand.owner = drawCommand.owner;
+        pickCommand.primitiveType = drawCommand.primitiveType;
+        pickCommand.vertexArray = drawCommand.vertexArray;
+        pickCommand.uniformMap = drawCommand.uniformMap;
+        pickCommand.boundingVolume = drawCommand.boundingVolume;
+        pickCommand.orientedBoundingBox = pickCommand.orientedBoundingBox;
+        pickCommand.pass = drawCommand.pass;
+
+        frameState.commandList.push(pickCommand);
     }
 
     return GlobeSurfaceTileProvider;

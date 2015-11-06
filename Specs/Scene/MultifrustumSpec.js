@@ -14,8 +14,12 @@ defineSuite([
         'Core/Matrix4',
         'Renderer/BufferUsage',
         'Renderer/DrawCommand',
+        'Renderer/RenderState',
+        'Renderer/Sampler',
+        'Renderer/ShaderProgram',
         'Renderer/TextureMagnificationFilter',
         'Renderer/TextureMinificationFilter',
+        'Renderer/VertexArray',
         'Scene/BillboardCollection',
         'Scene/BlendingState',
         'Scene/Pass',
@@ -37,8 +41,12 @@ defineSuite([
         Matrix4,
         BufferUsage,
         DrawCommand,
+        RenderState,
+        Sampler,
+        ShaderProgram,
         TextureMagnificationFilter,
         TextureMinificationFilter,
+        VertexArray,
         BillboardCollection,
         BlendingState,
         Pass,
@@ -104,7 +112,7 @@ defineSuite([
         });
 
         // ANGLE Workaround
-        atlas.texture.sampler = context.createSampler({
+        atlas.texture.sampler = new Sampler({
             minificationFilter : TextureMinificationFilter.NEAREST,
             magnificationFilter : TextureMagnificationFilter.NEAREST
         });
@@ -185,9 +193,20 @@ defineSuite([
         scene.renderForSpecs();
 
         expect(DrawCommand.prototype.execute).toHaveBeenCalled();
-        expect(DrawCommand.prototype.execute.calls.mostRecent().args.length).toEqual(4);
-        expect(DrawCommand.prototype.execute.calls.mostRecent().args[3]).toBeDefined();
-        expect(DrawCommand.prototype.execute.calls.mostRecent().args[3].fragmentShaderSource.sources[1]).toContain('czm_Debug_main');
+
+        var calls = DrawCommand.prototype.execute.calls.all();
+        var billboardCall;
+        for (var i = 0; i < calls.length; ++i) {
+            if (calls[i].object.owner instanceof BillboardCollection) {
+                billboardCall = calls[i];
+                break;
+            }
+        }
+
+        expect(billboardCall).toBeDefined();
+        expect(billboardCall.args.length).toEqual(4);
+        expect(billboardCall.args[3]).toBeDefined();
+        expect(billboardCall.args[3].fragmentShaderSource.sources[1]).toContain('czm_Debug_main');
     });
 
     function createPrimitive(bounded, closestFrustum) {
@@ -213,7 +232,7 @@ defineSuite([
             };
         };
 
-        Primitive.prototype.update = function(context, frameState, commandList) {
+        Primitive.prototype.update = function(frameState) {
             if (!defined(this._sp)) {
                 var vs = '';
                 vs += 'attribute vec4 position;';
@@ -237,19 +256,26 @@ defineSuite([
                     maximumCorner: maximumCorner
                 }));
                 var attributeLocations = GeometryPipeline.createAttributeLocations(geometry);
-                this._va = context.createVertexArrayFromGeometry({
-                    geometry: geometry,
-                    attributeLocations: attributeLocations,
-                    bufferUsage: BufferUsage.STATIC_DRAW
+                this._va = VertexArray.fromGeometry({
+                    context : frameState.context,
+                    geometry : geometry,
+                    attributeLocations : attributeLocations,
+                    bufferUsage : BufferUsage.STATIC_DRAW
                 });
 
-                this._sp = context.createShaderProgram(vs, fs, attributeLocations);
-                this._rs = context.createRenderState({
+                this._sp = ShaderProgram.fromCache({
+                    context : frameState.context,
+                    vertexShaderSource : vs,
+                    fragmentShaderSource : fs,
+                    attributeLocations : attributeLocations
+                });
+
+                this._rs = RenderState.fromCache({
                     blending : BlendingState.ALPHA_BLEND
                 });
             }
 
-            commandList.push(new DrawCommand({
+            frameState.commandList.push(new DrawCommand({
                 renderState : this._rs,
                 shaderProgram : this._sp,
                 vertexArray : this._va,
